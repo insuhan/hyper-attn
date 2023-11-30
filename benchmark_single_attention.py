@@ -7,12 +7,17 @@ import triton
 from models.attention.flash_attn_triton_for_hyper import flash_attn_func
 from models.attention.hyper_attn import HyperAttention
 
+try:
+    from flash_attn import flash_attn_func as flash_attn_func_cuda
+except ImportError:
+    flash_attn_func_cuda = None
+
 
 def get_arguments():
     parser = argparse.ArgumentParser()
     parser.add_argument("--no_causal", action="store_true")
     parser.add_argument("--mode", type=str, default="fwd+bwd", choices=['fwd', 'bwd', 'fwd+bwd'])
-    parser.add_argument("--method", type=str, default="flash", choices=['flash', 'hyper'])
+    parser.add_argument("--method", type=str, default="flash", choices=['flash', 'flash-cuda', 'hyper'])
     return parser.parse_args()
 
 
@@ -23,9 +28,14 @@ def get_tensors(batch_size, seq_len, head_size, dim):
     return q, k, v
 
 
-def run_flash_attn(batch_size, head_size, seq_len, dim, causal, mode, warmup=20, rep=100):
+def run_flash_attn(batch_size, head_size, seq_len, dim, causal, mode, impl="triton", warmup=20, rep=100):
     q, k, v = get_tensors(batch_size, seq_len, head_size, dim)
-    fn = lambda: flash_attn_func(q, k, v, None, causal, None)[0]
+    if impl == "cuda":
+        if flash_attn_func_cuda is None:
+            raise ImportError("Please install flash_attn (pip install flash-attn --no-build-isolation)")
+        fn = lambda: flash_attn_func_cuda(q, k, v, causal=causal)
+    else:
+        fn = lambda: flash_attn_func(q, k, v, None, causal, None)[0]
     if mode == 'fwd':
         return triton.testing.do_bench(fn, warmup=warmup, rep=rep, percentiles=[0.2, 0.5, 0.8])
     elif mode == 'bwd':
@@ -88,6 +98,8 @@ def main():
     for seq_len in seq_lens:
         if method == 'flash':
             ms = run_flash_attn(batch_size, head_size, seq_len, dim, causal, mode=args.mode)
+        elif method == 'flash-cuda':
+            ms = run_flash_attn(batch_size, head_size, seq_len, dim, causal, mode=args.mode, impl="cuda")
         elif method == 'hyper':
             ms = run_hyper_attn(batch_size, head_size, seq_len, dim, causal, mode=args.mode)
         else:
