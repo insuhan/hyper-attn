@@ -70,8 +70,9 @@ the **sorted locality sensitive hashing** (sortLSH) based on the Hamming distanc
 
 To support the causal masking, we (implicitly) split the attention matrix into 3 parts: (1) upper-left, (2) lower-right and (3) lower-left. Both (1) and (2) still require the causal masking as they are near the diagonal and we recursively apply this process for them. The submatrix (3) is located entirely below the diagonal hence we run the HyperAttention without masking.
 
+
 <p align="center">
-    <img src="./assets/causal_masking.png" height="280">
+    <img src="./assets/causal_masking.png" width="814">
 </p>
 
 
