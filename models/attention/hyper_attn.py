@@ -2,19 +2,20 @@ import math
 import torch
 from einops import rearrange
 
-from .utils import exact_attention, add_self_attentions, indexing
+from .utils import exact_attention, exact_attention_cuda, add_self_attentions, indexing
 from .angular_lsh import AngularLSH
 
 
 class HyperAttention(torch.nn.Module):
 
-    def __init__(self, input_dim=64, lsh_num_projs=7, block_size=256, sample_size=256, min_seq_len=4096):
+    def __init__(self, input_dim=64, lsh_num_projs=7, block_size=256, sample_size=256, min_seq_len=4096, cuda=False):
         super().__init__()
         self.input_dim = input_dim
         self.lsh_num_projs = lsh_num_projs
         self.block_size = block_size
         self.sample_size = sample_size
         self.min_seq_len = min_seq_len
+        self.cuda = cuda
         self.lsh = AngularLSH(num_projs=self.lsh_num_projs, dim=(1, 1, input_dim))
 
         
@@ -34,7 +35,10 @@ class HyperAttention(torch.nn.Module):
         # With causal masking
         else:
             if n_key <= self.min_seq_len:
-                attn, lse = exact_attention(query, key, value, scale, causal=True)
+                if self.cuda:
+                    attn, lse = exact_attention_cuda(query, key, value, scale, causal=True)
+                else:
+                    attn, lse = exact_attention(query, key, value, scale, causal=True)
             else:
             
                 # If n_query is odd we pad inputs by adding all-zero rows
@@ -89,7 +93,10 @@ class HyperAttention(torch.nn.Module):
         n_key = key.shape[2]
 
         if self.min_seq_len > n_query:
-            return exact_attention(query, key, value, scale, False, None)
+            if self.cuda:
+                return exact_attention_cuda(query, key, value, scale, causal=False)
+            else:
+                return exact_attention(query, key, value, scale, causal=False)
 
         # 1. Sorted block-diagonal via sortLSH
         _, query_sort_idx = torch.sort(self.lsh.hash(query), dim=2, stable=True) # batch_size x head_size x n
@@ -112,9 +119,14 @@ class HyperAttention(torch.nn.Module):
             key_split_per_block = key_sorted.view(-1, 1, key_block_size, dim)
             value_split_per_block = value_sorted.view(-1, 1, key_block_size, dim)
 
-            attn_block, lse_block = exact_attention(
-                query_split_per_block, key_split_per_block, value_split_per_block,
-                softmax_scale=scale, causal=False)
+            if self.cuda:
+                attn_block, lse_block = exact_attention_cuda(
+                    query_split_per_block, key_split_per_block, value_split_per_block,
+                    softmax_scale=scale, causal=False)
+            else:
+                attn_block, lse_block = exact_attention(
+                    query_split_per_block, key_split_per_block, value_split_per_block,
+                    softmax_scale=scale, causal=False)
 
             if attn_block.shape[2] not in attn_block.stride():
                 attn_block = attn_block.contiguous()
@@ -144,17 +156,19 @@ class HyperAttention(torch.nn.Module):
             
             # Compute mask for hiding A_ij computed in block-diagonal attention
             offset_n = rearrange(torch.arange(n_query, device=query_sorted.device), 'n -> 1 n 1')
-            block_mask = (offset_n // query_block_size) == (sampled_set // key_block_size).view(-1, 1, sample_size)
-            block_mask = block_mask.view(batch_size, head_size, -1, sample_size)
-            block_mask = block_mask.to(query_sorted.dtype)
-            block_mask *= torch.finfo(query_sorted.dtype).min # adding -inf added to QK^T
-
             weights = n_key / sample_size
-
             value_subset = indexing(value_sorted, sampled_set)
             key_subset = indexing(key_sorted, sampled_set)
 
-            attn_res, lse_res = exact_attention(query_sorted, key_subset, value_subset, scale, causal=False, bias=block_mask)
+            if not self.cuda:
+                block_mask = (offset_n // query_block_size) == (sampled_set // key_block_size).view(-1, 1, sample_size)
+                block_mask = block_mask.view(batch_size, head_size, -1, sample_size)
+                block_mask = block_mask.to(query_sorted.dtype)
+                block_mask *= torch.finfo(query_sorted.dtype).min # adding -inf added to QK^T
+
+                attn_res, lse_res = exact_attention(query_sorted, key_subset, value_subset, scale, causal=False, bias=block_mask)
+            else:
+                attn_res, lse_res = exact_attention_cuda(query_sorted, key_subset, value_subset, scale, causal=False)
             lse_res = lse_res + math.log(weights)
 
             # Add two attentions

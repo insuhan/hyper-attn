@@ -1,5 +1,9 @@
 import math
 import torch
+try:
+    from flash_attn import flash_attn_func as flash_attn_func_cuda
+except ImportError:
+    flash_attn_func_cuda = None
 
 from .flash_attn_triton_for_hyper import flash_attn_func
 
@@ -70,3 +74,13 @@ def exact_attention(query, key, value, softmax_scale, causal=False, bias=None):
     lse = lse.unsqueeze(-1)
     return out, lse
     
+
+def exact_attention_cuda(query, key, value, softmax_scale, causal, bias=None):
+    if flash_attn_func_cuda is None:
+        raise ImportError("Please install flash_attn (pip install flash-attn --no-build-isolation)")
+    out, lse, _ = flash_attn_func_cuda(
+        query.transpose(1,2), key.transpose(1,2), value.transpose(1,2),
+        softmax_scale=softmax_scale, causal=causal, return_attn_probs=True)
+    out = out.transpose(1,2)
+    lse = lse.unsqueeze(-1)
+    return out, lse

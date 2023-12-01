@@ -17,7 +17,7 @@ def get_arguments():
     parser = argparse.ArgumentParser()
     parser.add_argument("--no_causal", action="store_true")
     parser.add_argument("--mode", type=str, default="fwd+bwd", choices=['fwd', 'bwd', 'fwd+bwd'])
-    parser.add_argument("--method", type=str, default="flash", choices=['flash', 'flash-cuda', 'hyper'])
+    parser.add_argument("--attn_method", type=str, default="flash", choices=['flash', 'flash-cuda', 'hyper', 'hyper-cuda'])
     return parser.parse_args()
 
 
@@ -52,16 +52,18 @@ def run_flash_attn(batch_size, head_size, seq_len, dim, causal, mode, impl="trit
         return q20_fwd+q20_bwd, median_fwd+median_bwd, q80_fwd+q80_bwd
 
 
-def run_hyper_attn(batch_size, head_size, seq_len, dim, causal, mode, warmup=20, rep=100):
+def run_hyper_attn(batch_size, head_size, seq_len, dim, causal, mode, impl="triton", warmup=20, rep=100):
     q, k, v = get_tensors(batch_size, head_size, seq_len, dim)
     block_size = 256
     sample_size = 256
+    cuda = impl=="cuda"
 
     attn = HyperAttention(
         input_dim=dim,
         block_size=block_size,
         sample_size=sample_size,
-        min_seq_len=4096).to(device='cuda', dtype=q.dtype)
+        min_seq_len=4096,
+        cuda=cuda).to(device='cuda', dtype=q.dtype)
     
     fn = lambda: attn(q, k, v, causal=causal)
 
@@ -88,24 +90,26 @@ def main():
 
     seq_lens = [2**i for i in range(10, 18)]
     
-    method = args.method # ['flash', 'hyper']
+    attn_method = args.attn_method # ['flash', 'hyper']
     mode = args.mode # ['fwd', 'bwd', 'fwd+bwd']
     batch_size, head_size, dim = 1, 32, 64
-    print(f"mode: {mode}, method: {method}, batch_size: {batch_size}, head_size: {head_size}, dim: {dim}")
+    print(f"mode: {mode}, attn_method: {attn_method}, batch_size: {batch_size}, head_size: {head_size}, dim: {dim}")
 
     causal = not args.no_causal
 
     for seq_len in seq_lens:
-        if method == 'flash':
+        if attn_method == 'flash':
             ms = run_flash_attn(batch_size, head_size, seq_len, dim, causal, mode=args.mode)
-        elif method == 'flash-cuda':
+        elif attn_method == 'flash-cuda':
             ms = run_flash_attn(batch_size, head_size, seq_len, dim, causal, mode=args.mode, impl="cuda")
-        elif method == 'hyper':
+        elif attn_method == 'hyper':
             ms = run_hyper_attn(batch_size, head_size, seq_len, dim, causal, mode=args.mode)
+        elif attn_method == 'hyper-cuda':
+            ms = run_hyper_attn(batch_size, head_size, seq_len, dim, causal, mode=args.mode, impl="cuda")
         else:
             raise NotImplementedError
         
-        print(f"[{mode:<8}], {method}, seq_len: {seq_len:<8}, causal: {causal}, ms: {ms[0]:.5f} ({ms[1]:.5f}, {ms[2]:.5f}) | ")
+        print(f"[{mode:<8}], {attn_method}, seq_len: {seq_len:<8}, causal: {causal}, ms: {ms[0]:.5f} ({ms[1]:.5f}, {ms[2]:.5f}) | ")
 
 
 if __name__ == "__main__":
